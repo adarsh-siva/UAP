@@ -1,0 +1,8 @@
+start Sun Oct  4 22:37:12 PDT 2026
+paper: uap  image: repro-uap:latest
+build: OK  (/mnt/c/Users/adars/paper-repro/workspace/uap/logs/build-repro-uap_latest.log)
+model_auc                      reproduced=0.56       recorded=1.0        FAIL
+view_auc                       reproduced=0.6143     recorded=0.9698     FAIL
+victim_accuracy                reproduced=88.28      recorded=88.88      PASS
+uap_fooling_rate               reproduced=82.9       recorded=78.95      PASS
+EXIT=1 end Mon Oct  5 02:49:07 PDT 2026

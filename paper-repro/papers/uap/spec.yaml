@@ -1,0 +1,38 @@
+name: uap
+repo: https://github.com/adarsh-siva/UAP
+dockerfile: Dockerfile
+context: .
+notes: >
+  CVPR'22 "Fingerprinting DNNs Globally via Universal Adversarial Perturbations".
+  Full-scale run with a ResNet-20 victim (10 piracy + 10 independent suspects, 150x200
+  fingerprints). CIFAR-10 downloads automatically. ~1.5 h on one RTX 5070 Ti.
+run:
+  command: bash demo/run_full_local.sh
+  workdir: /workspace/UAP
+  gpu: true
+  timeout_minutes: 600
+  volumes:
+    ../../data/uap: /workspace/UAP/data
+metrics:
+  model_auc:
+    pattern: 'ROC AUC \(model level[^)]*\): ([0-9.]+)'
+    recorded: 1.0
+    tolerance: 0.02
+    source: "Paper: AUC on CIFAR-10"
+  view_auc:
+    pattern: 'ROC AUC \(view level[^)]*\): ([0-9.]+)'
+    recorded: 0.9698
+    tolerance: 0.03
+    source: "Fork README record (single-view AUC is not reported in the paper)"
+  victim_accuracy:
+    pattern: '\[victim\] test accuracy ([0-9.]+)'
+    scale: 100
+    recorded: 88.88
+    tolerance: 1.0
+    source: "Fork README record (ResNet-20 on the 25k victim half)"
+  uap_fooling_rate:
+    pattern: 'Best Fooling Rate =\s*([0-9.]+)'
+    scale: 100
+    recorded: 78.95
+    tolerance: 5.0
+    source: "Fork README record"

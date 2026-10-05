@@ -1,0 +1,30 @@
+name: ipmix
+repo: https://github.com/hzlsaber/IPMix
+dockerfile: Dockerfile
+context: .
+notes: >
+  NeurIPS'23 IPMix. Needs data the code cannot fetch itself, placed under data/ipmix/ on the host:
+  cifar/CIFAR-10-C/ (from Zenodo, Hendrycks et al.) and ipmix_set/ (the mixing set from the
+  authors' Google Drive link in the README; any folder of unlabeled images works per the authors).
+  CIFAR-10 itself downloads automatically into cifar/. Recorded values: fill from the paper's
+  CIFAR-10 table (agent: use read_paper on https://arxiv.org/pdf/2310.04780).
+run:
+  command: python cifar.py --dataset cifar10 --data-path /data --mixing-set /data/ipmix_set --model wrn
+  workdir: /workspace/IPMix
+  gpu: true
+  timeout_minutes: 2880
+  volumes:
+    ../../data/ipmix: /data
+metrics:
+  clean_error:
+    after: '^Clean'
+    pattern: 'Test Error ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 0.5
+    source: "TODO: paper table, CIFAR-10, WRN-40-4, clean error (%)"
+  mce:
+    pattern: 'Mean (?:C )?Corruption Error: ([0-9.]+)'
+    recorded: null
+    tolerance: 1.0
+    source: "TODO: paper table, CIFAR-10-C, WRN-40-4, mCE (%)"

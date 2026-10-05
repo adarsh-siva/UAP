@@ -1,0 +1,94 @@
+{
+  "spec_path": "/mnt/c/Users/adars/paper-repro/papers/uap/spec.yaml",
+  "images": {
+    "repro-uap:latest": {
+      "dockerfile": "/mnt/c/Users/adars/paper-repro/papers/uap/Dockerfile",
+      "context": "/mnt/c/Users/adars/paper-repro/papers/uap",
+      "ok": true,
+      "log": "/mnt/c/Users/adars/paper-repro/workspace/uap/logs/build-repro-uap_latest.log",
+      "seconds": 596.1
+    }
+  },
+  "runs": {
+    "baf2bd2e0fd1": {
+      "container": "repro-uap:latest",
+      "command": "bash demo/run_full_local.sh",
+      "log": "/mnt/c/Users/adars/paper-repro/workspace/uap/logs/run-baf2bd2e0fd1.log",
+      "returncode": 0,
+      "seconds": 14518.2,
+      "finished": "2026-10-05 02:49:07"
+    }
+  },
+  "reproduced": {
+    "uap/model_auc": {
+      "value": 0.56,
+      "container": "repro-uap:latest",
+      "command": "bash demo/run_full_local.sh",
+      "log": "/mnt/c/Users/adars/paper-repro/workspace/uap/logs/run-baf2bd2e0fd1.log",
+      "at": "2026-10-05 02:49:07"
+    },
+    "uap/view_auc": {
+      "value": 0.6143,
+      "container": "repro-uap:latest",
+      "command": "bash demo/run_full_local.sh",
+      "log": "/mnt/c/Users/adars/paper-repro/workspace/uap/logs/run-baf2bd2e0fd1.log",
+      "at": "2026-10-05 02:49:07"
+    },
+    "uap/victim_accuracy": {
+      "value": 88.28,
+      "container": "repro-uap:latest",
+      "command": "bash demo/run_full_local.sh",
+      "log": "/mnt/c/Users/adars/paper-repro/workspace/uap/logs/run-baf2bd2e0fd1.log",
+      "at": "2026-10-05 02:49:07"
+    },
+    "uap/uap_fooling_rate": {
+      "value": 82.89999999999999,
+      "container": "repro-uap:latest",
+      "command": "bash demo/run_full_local.sh",
+      "log": "/mnt/c/Users/adars/paper-repro/workspace/uap/logs/run-baf2bd2e0fd1.log",
+      "at": "2026-10-05 02:49:07"
+    }
+  },
+  "validations": {
+    "uap/model_auc": {
+      "metric": "model_auc",
+      "status": "FAIL",
+      "reproduced": 0.56,
+      "recorded": 1.0,
+      "difference": -0.44,
+      "allowed_difference": 0.02,
+      "tolerance": "0.02 (abs)",
+      "source": "Paper: AUC on CIFAR-10"
+    },
+    "uap/view_auc": {
+      "metric": "view_auc",
+      "status": "FAIL",
+      "reproduced": 0.6143,
+      "recorded": 0.9698,
+      "difference": -0.3555,
+      "allowed_difference": 0.03,
+      "tolerance": "0.03 (abs)",
+      "source": "Fork README record (single-view AUC is not reported in the paper)"
+    },
+    "uap/victim_accuracy": {
+      "metric": "victim_accuracy",
+      "status": "PASS",
+      "reproduced": 88.28,
+      "recorded": 88.88,
+      "difference": -0.6,
+      "allowed_difference": 1.0,
+      "tolerance": "1.0 (abs)",
+      "source": "Fork README record (ResNet-20 on the 25k victim half)"
+    },
+    "uap/uap_fooling_rate": {
+      "metric": "uap_fooling_rate",
+      "status": "PASS",
+      "reproduced": 82.89999999999999,
+      "recorded": 78.95,
+      "difference": 3.95,
+      "allowed_difference": 5.0,
+      "tolerance": "5.0 (abs)",
+      "source": "Fork README record"
+    }
+  }
+}

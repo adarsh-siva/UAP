@@ -1,0 +1,61 @@
+name: ep_bnp
+repo: https://github.com/RJ-T/NIPS2022_EP_BNP
+dockerfile: Dockerfile
+context: .
+notes: >
+  NeurIPS'22 "Pre-activation Distributions Expose Backdoor Neurons". Trains a BadNets-poisoned
+  ResNet-18 on CIFAR-10 (auto-downloaded into data/ep_bnp/), then applies EP / BNP / CLP pruning.
+  test.py prints the same labels once per defense, so each metric is anchored on its section header.
+  Recorded values: fill from the paper's CIFAR-10 BadNets table.
+run:
+  command: >
+    python train.py --attack-type badnets --poisoning-rate 0.1 --trigger-size 3 --manual-seed 0 --dataset-dir /data/cifar10 &&
+    python test.py --attack-type badnets --poisoning-rate 0.1 --trigger-size 3 --manual-seed 0 --dataset-dir /data/cifar10
+  workdir: /workspace/NIPS2022_EP_BNP
+  gpu: true
+  timeout_minutes: 720
+  volumes:
+    ../../data/ep_bnp: /data
+metrics:
+  no_defense_acc:
+    after: 'Before prunning'
+    pattern: 'Test clean accuracy: ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 1.0
+    source: "TODO: paper table, CIFAR-10 BadNets, no defense ACC"
+  no_defense_asr:
+    after: 'Before prunning'
+    pattern: 'Test attack success rate: ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 2.0
+    source: "TODO: paper table, CIFAR-10 BadNets, no defense ASR"
+  ep_acc:
+    after: 'After EP prunning'
+    pattern: 'Test clean accuracy: ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 1.0
+    source: "TODO: paper table, CIFAR-10 BadNets, EP ACC"
+  ep_asr:
+    after: 'After EP prunning'
+    pattern: 'Test attack success rate: ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 2.0
+    source: "TODO: paper table, CIFAR-10 BadNets, EP ASR"
+  bnp_acc:
+    after: 'After BNP prunning'
+    pattern: 'Test clean accuracy: ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 1.0
+    source: "TODO: paper table, CIFAR-10 BadNets, BNP ACC"
+  bnp_asr:
+    after: 'After BNP prunning'
+    pattern: 'Test attack success rate: ([0-9.]+)'
+    occurrence: first
+    recorded: null
+    tolerance: 2.0
+    source: "TODO: paper table, CIFAR-10 BadNets, BNP ASR"
