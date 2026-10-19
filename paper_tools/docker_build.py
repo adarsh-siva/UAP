@@ -1,3 +1,12 @@
+import json
+import os
+import re
+
+from langchain_core.tools import tool
+
+from . import docker_ops
+from .state import ReproState
+
 def do_docker_build(state: ReproState, dockerfile: str, tag: str = "", context: str = "") -> dict:
     spec = state.spec if state.data.get("spec_path") else None
     df = spec.resolve(dockerfile) if spec else os.path.abspath(os.path.expanduser(dockerfile))
