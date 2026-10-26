@@ -11,3 +11,7 @@ demo/run_resnet18_demo/
 demo/*.log
 demo/step5_final.status
 nohup.out
+
+# Local paper intake environment and reports
+.venv-intake/
+intake-results/
