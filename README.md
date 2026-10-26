@@ -90,3 +90,8 @@ Please cite this work if you find it useful:
   year={2022}
 }
 ```
+## Paper and GitHub intake
+
+See [paper_intake/README.md](paper_intake/README.md) to extract a paper PDF,
+inspect a GitHub repository, and optionally analyze paper evidence with OpenAI.
+This standalone tool does not install model dependencies or execute experiments.
