@@ -1,0 +1,13 @@
+.git
+**/__pycache__
+**/.pytest_cache
+.venv*
+**/.venv*
+cross-paper-results
+data
+runs
+*.pt
+*.pth
+*.zip
+.env
+**/.env

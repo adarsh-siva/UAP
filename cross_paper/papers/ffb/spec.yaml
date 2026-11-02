@@ -1,0 +1,33 @@
+name: ffb
+repo: https://github.com/Auspr7ng/fair_fairness_benchmark
+dockerfile: Dockerfile
+context: .
+notes: Team fork CelebA Attractive/Male, ResNet20 ERM, 20k rows, seed 1314, 150 steps.
+  Partial protocol, not the full paper. Dataset must be supplied. References intentionally
+  unset.
+run:
+  command: python ffb/reproduce/reproduce_resnet20_celeba.py --data /data/celeba/raw/celeba.csv
+    --weights random --output /repro_out/result.json
+  workdir: /workspace/repository
+  gpu: true
+  timeout_minutes: 120
+  env:
+    WANDB_MODE: offline
+  volumes:
+    ../../../data/ffb: /data
+metrics:
+  test_acc:
+    pattern: '"test/acc":\s*([0-9.eE+-]+)'
+    file: result.json
+    after: '"test":'
+    recorded: null
+    tolerance: 1.0
+    source: No verified reference for this fork-specific CelebA ResNet20 partial protocol
+  test_dp:
+    pattern: '"test/dp":\s*([0-9.eE+-]+)'
+    file: result.json
+    after: '"test":'
+    recorded: null
+    tolerance: 1.0
+    source: No verified reference for this fork-specific CelebA ResNet20 partial protocol
+image: vip-ffb:3efc8957cd63

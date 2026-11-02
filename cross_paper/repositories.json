@@ -1,0 +1,43 @@
+{
+  "uap": {
+    "repo": "https://github.com/adarsh-siva/UAP",
+    "commit": "b5dcb8b0d4b6634a1f79a600633fd5260b633f62",
+    "spec": "papers/uap/spec.yaml",
+    "dockerfile": "papers/uap/Dockerfile",
+    "required_files": [
+      "demo/run_full_local.sh",
+      "demo/step6_metrics.py"
+    ]
+  },
+  "ipmix": {
+    "repo": "https://github.com/huypham-0607/IPMix",
+    "commit": "c9f9a84cf3cb5cff3ceffd47e9942944f8691384",
+    "spec": "papers/ipmix/spec.yaml",
+    "dockerfile": "papers/ipmix/Dockerfile",
+    "required_files": [
+      "cifar.py",
+      "IPMix_utils.py"
+    ]
+  },
+  "ep_bnp": {
+    "repo": "https://github.com/pranavj834/NIPS2022_EP_BNP",
+    "commit": "3d49c4fc96088503209033eed2db810b30392b28",
+    "spec": "papers/ep_bnp/spec.yaml",
+    "dockerfile": "papers/ep_bnp/Dockerfile",
+    "required_files": [
+      "train.py",
+      "test.py",
+      "models/resnet20.py"
+    ]
+  },
+  "ffb": {
+    "repo": "https://github.com/Auspr7ng/fair_fairness_benchmark",
+    "commit": "3efc8957cd63a62184de0f9452f2f51c3a254e53",
+    "spec": "papers/ffb/spec.yaml",
+    "dockerfile": "papers/ffb/Dockerfile",
+    "required_files": [
+      "ffb/reproduce/reproduce_resnet20_celeba.py",
+      "ffb/src/metrics.py"
+    ]
+  }
+}

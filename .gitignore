@@ -15,3 +15,6 @@ nohup.out
 # Local paper intake environment and reports
 .venv-intake/
 intake-results/
+cross-paper-results/
+.venv-cross-paper/
+.pytest_cache/
