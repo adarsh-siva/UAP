@@ -1,4 +1,4 @@
-"""Read tools for a LangChain agent: read_file and read_paper.
+"""Read tools for a LangChain agent: read_file (with regex search) and read_paper.
 
 Requires: langchain-core, pypdf (pip install langchain-core pypdf), and curl for PDF URLs.
 """
@@ -13,18 +13,49 @@ PAPER_CACHE_DIR = os.environ.get(
     "PAPER_CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".paper_cache"))
 
 
+# read_file returns at most this many characters, so one call cannot fill a model's context.
+READ_LIMIT = 12000
+ANSI_ESCAPES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
 @tool
-def read_file(path: str, start_line: int = 1, max_lines: int = 300) -> str:
-    """Read lines from a text file (e.g. a cloned repo's training script, to find its
-    command-line flags and how it prints metrics)."""
+def read_file(path: str, start_line: int = 1, max_lines: int = 200, search: str = "") -> str:
+    """Read numbered lines from a text file (e.g. a cloned repo's training script, to find its
+    command-line flags and how it prints metrics, or a run log).
+    - Without `search`: returns `max_lines` lines from `start_line`.
+    - With `search` (a case-insensitive regex): returns only matching lines, each with the
+      2 lines around it, starting from `start_line`. Use this to find a function or a
+      print statement instead of paging through the whole file."""
     try:
         with open(os.path.expanduser(path), errors="replace") as f:
-            lines = f.readlines()
+            text = f.read()
     except OSError as e:
         return f"ERROR: {e}"
-    chunk = lines[start_line - 1:start_line - 1 + max_lines]
-    return "".join(f"{i}\t{l}" for i, l in enumerate(chunk, start_line)) + \
-        (f"\n... ({len(lines)} lines total)" if len(lines) > start_line - 1 + max_lines else "")
+    # Logs redraw progress bars with \r and colour codes; normalise them into plain lines.
+    lines = ANSI_ESCAPES.sub("", text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    start = max(1, start_line)
+    if search:
+        try:
+            rx = re.compile(search, re.IGNORECASE)
+        except re.error as e:
+            return f"ERROR: invalid regex: {e}"
+        hits = [i for i in range(start - 1, len(lines)) if rx.search(lines[i])][:max(1, max_lines)]
+        if not hits:
+            return f"no lines match {search!r} ({len(lines)} lines total)"
+        keep = sorted({j for i in hits for j in range(max(0, i - 2), min(len(lines), i + 3))})
+        out, prev = [], None
+        for j in keep:
+            if prev is not None and j != prev + 1:
+                out.append("---")
+            out.append(f"{j + 1}\t{lines[j][:400]}")
+            prev = j
+        return "\n".join(out)[:READ_LIMIT] + f"\n({len(hits)} matching lines, {len(lines)} lines total)"
+    chunk = lines[start - 1:start - 1 + max_lines]
+    body = "\n".join(f"{i}\t{l[:400]}" for i, l in enumerate(chunk, start))
+    more = start - 1 + max_lines < len(lines)
+    if len(body) > READ_LIMIT:
+        body, more = body[:READ_LIMIT], True
+    return body + (f"\n... (truncated; {len(lines)} lines total - use start_line or search)" if more else "")
 
 
 @tool

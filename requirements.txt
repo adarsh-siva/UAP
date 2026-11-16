@@ -12,3 +12,4 @@ tqdm==4.66.1
 langchain-core
 pypdf
 PyYAML
+ruamel.yaml

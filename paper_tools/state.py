@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import os
 import time
 from typing import Optional
 
 from .spec import PaperSpec, load_spec
+
+_SAVE_LOCK = threading.Lock()
 
 
 class ReproState:
@@ -22,10 +25,12 @@ class ReproState:
         self._spec: Optional[PaperSpec] = None
 
     def save(self):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(self.data, f, indent=2)
-        os.replace(tmp, self.path)
+        # Tools can run in parallel threads: serialize saves and give each writer its own temp file.
+        with _SAVE_LOCK:
+            tmp = f"{self.path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w") as f:
+                json.dump(self.data, f, indent=2)
+            os.replace(tmp, self.path)
 
     # ---- active spec ----
     def set_spec(self, spec_path: str) -> PaperSpec:
