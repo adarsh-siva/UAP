@@ -5,13 +5,21 @@ Core tools (the reproduction loop):
     reproduce_metric(metric, container) run the paper's command in the container, parse the metric
     validate_metric(metric)             compare the reproduced value with the recorded value
 
-Supporting tools (so an agent can onboard a new paper):
-    load_paper_spec, inspect_repo, read_file, write_file, read_paper
+Spec tools:
+    find_run_commands, generate_spec    work out how to run the repo and write its spec.yaml
+    load_paper_spec, update_spec_metric load / adjust a spec
+
+Supporting tools: inspect_repo, read_file, write_file, read_paper
+
+Compatibility with the other teams: Dockerfiles from Team 1 (COPY supported on Apptainer),
+paper values from a Team 2 metrics record (spec `record:`), reproduced values written back in
+the same record format, and Team 3's argument scanner used by find_run_commands when available.
 """
 from __future__ import annotations
 
 import json
 import os
+import threading
 import re
 import subprocess
 import time
@@ -19,14 +27,20 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from . import docker_ops
-from .extract import compare, extract_value
+from . import docker_ops, spec_gen
+from .extract import compare, locate
 from .state import ReproState
 
 LOG_TAIL = 4000
+READ_LIMIT = 12000
+ANSI_ESCAPES = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 def _tail(text: str, n: int = LOG_TAIL) -> str:
+    # Apptainer prints a block of harmless mount warnings on every run; drop them so the
+    # excerpt shows the program's own output.
+    text = "\n".join(l for l in text.splitlines() if not l.startswith(("WARNING: Skipping mount", "WARNING: nv files",
+                                                                      "WARNING: Overriding HOME")))
     return text if len(text) <= n else "...[truncated]...\n" + text[-n:]
 
 
@@ -60,10 +74,13 @@ def do_docker_build(state: ReproState, dockerfile: str, tag: str = "", context: 
     else:
         ctx = os.path.dirname(df)
     tag = tag or (spec.image_tag() if spec else f"repro-{os.path.basename(os.path.dirname(df)).lower()}:latest")
-    log = os.path.join(state.paper_dir("logs") if spec else state.workspace, f"build-{tag.replace(':', '_').replace('/', '_')}.log")
+    # One log per attempt, so an earlier failure is still readable after a rebuild.
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    log = os.path.join(state.paper_dir("logs") if spec else state.workspace,
+                       f"build-{tag.replace(':', '_').replace('/', '_')}-{stamp}.log")
     t0 = time.time()
     try:
-        rc, out = docker_ops.build(df, ctx, tag, log)
+        rc, out = docker_ops.build(df, ctx, tag, log, build_args=spec.build_args if spec else None)
     except docker_ops.DockerError as e:
         return {"status": "ERROR", "message": str(e)}
     state.data["images"][tag] = {"dockerfile": df, "context": ctx, "ok": rc == 0, "log": log,
@@ -115,22 +132,56 @@ def do_reproduce_metric(state: ReproState, metric: str, container: str = "") -> 
     else:
         source_text = out
 
-    value = extract_value(source_text, m)
+    value, line = locate(source_text, m)
     if value is None:
-        return {"status": "NOT_FOUND", "message": f"pattern {m.pattern!r} (after={m.after!r}) matched nothing",
-                "command": command, "log": log_path, "log_tail": _tail(source_text)}
+        if m.pattern == spec_gen.PATTERN_TODO:
+            message = ("the run finished, but this metric's pattern has not been written yet. Find the line "
+                       "with the final result in the run log (read_file with search on the log path), then "
+                       "set pattern (and occurrence) with update_spec_metric.")
+        else:
+            message = f"pattern {m.pattern!r} (after={m.after!r}) matched nothing"
+        return {"status": "NOT_FOUND", "message": message, "command": command, "log": log_path,
+                "log_tail": _tail(source_text)}
     state.data["reproduced"][state.key(metric)] = {"value": value, "container": container, "command": command,
-                                                  "log": log_path, "at": time.strftime("%Y-%m-%d %H:%M:%S")}
+                                                  "log": log_path, "matched_line": line,
+                                                  "at": time.strftime("%Y-%m-%d %H:%M:%S")}
     state.save()
-    return {"status": "OK", "metric": metric, "value": value, "reused_previous_run": reused, "log": log_path}
+    _write_reproduced_record(state)
+    return {"status": "OK", "metric": metric, "value": value, "matched_line": line,
+            "reused_previous_run": reused, "log": log_path}
+
+
+def _write_reproduced_record(state: ReproState) -> None:
+    """Reproduced values in Team 2's record format ({metric name: number}), next to the run logs,
+    so their record tools can read them."""
+    spec = state.spec
+    record = {}
+    for name, m in spec.metrics.items():
+        rep = state.data["reproduced"].get(state.key(name))
+        record[m.record_key or name] = rep["value"] if rep else None
+    path = os.path.join(state.paper_dir(), "reproduced_record.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(record, f, indent=4)
+    os.replace(tmp, path)
 
 
 EDITABLE_METRIC_FIELDS = {"recorded", "source", "tolerance", "tolerance_type", "pattern", "after",
                           "occurrence", "scale", "file", "command"}
 
 
+# The agent may call several tools at once (parallel threads). Spec edits read the whole file, change
+# one metric and write it back, so two at once would overwrite each other: they must take turns.
+_SPEC_LOCK = threading.RLock()
+
+
 def do_update_metric(state: ReproState, metric: str, updates: dict) -> dict:
     """Change named fields of one metric in the active spec file, leaving everything else as it was."""
+    with _SPEC_LOCK:
+        return _update_metric_locked(state, metric, updates)
+
+
+def _update_metric_locked(state: ReproState, metric: str, updates: dict) -> dict:
     from ruamel.yaml import YAML
 
     from .spec import load_spec
@@ -152,6 +203,7 @@ def do_update_metric(state: ReproState, metric: str, updates: dict) -> dict:
         return {"status": "ERROR", "message": f"unknown metric '{metric}'", "available": list(metrics)}
     output_fields = set(updates) & {"pattern", "after", "occurrence", "scale", "file", "command"}
     rejected = None
+    new_value, new_log, new_line = None, None, ""
     if output_fields:
         # These fields describe how to read the program's output, not the paper. Only accept a
         # change that demonstrably extracts a number from a real run of this metric's command.
@@ -167,8 +219,10 @@ def do_update_metric(state: ReproState, metric: str, updates: dict) -> dict:
                         "successful run of this metric's command to test them against yet")
         else:
             with open(logs[-1], errors="replace") as f:
-                if extract_value(f.read(), trial) is None:
-                    rejected = f"nothing is found with them in the latest run output ({logs[-1]})"
+                new_value, new_line = locate(f.read(), trial)
+            new_log = logs[-1]
+            if new_value is None:
+                rejected = f"nothing is found with them in the latest run output ({logs[-1]})"
         if rejected:
             updates = {k: v for k, v in updates.items() if k not in output_fields}
             if not updates:
@@ -189,6 +243,20 @@ def do_update_metric(state: ReproState, metric: str, updates: dict) -> dict:
                 "not_changed": sorted(output_fields),
                 "message": f"saved {sorted(updates)}; kept the existing {sorted(output_fields)} because {rejected}. "
                            "The existing ones are fine to leave as they are."}
+    if output_fields and new_value is not None:
+        # The reading settings changed, so the old reproduced value and verdict are stale.
+        key = state.key(metric)
+        state.data["reproduced"][key] = {"value": new_value, "log": new_log, "matched_line": new_line,
+                                         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                         "note": "re-extracted after update_spec_metric"}
+        state.data["validations"].pop(key, None)
+        state.save()
+        _write_reproduced_record(state)
+        return {"status": "OK", "metric": metric, "updated": updates,
+                "value_from_latest_run": new_value, "matched_line": new_line,
+                "message": "Saved. matched_line is the output line the number was read from: check it is the "
+                           "final result you meant (not an early step, another column or another metric), "
+                           "then call validate_metric."}
     return {"status": "OK", "metric": metric, "updated": updates}
 
 
@@ -242,22 +310,63 @@ def make_tools(state: ReproState, writable_roots: list) -> list:
         return _dump(do_validate_metric(state, metric))
 
     @tool
-    def update_metric(metric: str, recorded: Optional[float] = None, source: str = "",
-                      tolerance: Optional[float] = None, pattern: str = "", after: str = "") -> str:
+    def update_spec_metric(metric: str, recorded: Optional[float] = None, source: str = "",
+                      tolerance: Optional[float] = None, pattern: str = "", after: str = "",
+                      occurrence: str = "") -> str:
         """Edit one metric in the active spec, changing only the fields you pass and keeping the
-        rest of the file exactly as it is. Use this - not write_file.
+        rest of the file exactly as it is. Use this - not write_file. (Named update_spec_metric so it
+        does not clash with Team 2's update_metric, which edits their metrics record.)
         - `recorded`, `source`, `tolerance`: what the PAPER reports for this metric.
-        - `pattern`, `after`: regexes for reading OUR RUN's output (what the code prints), not the
-          paper. Leave them out unless reproduce_metric returned NOT_FOUND; such edits are only
-          accepted if they find a number in the latest run log."""
+        - `pattern`, `after`, `occurrence`: how to read OUR RUN's output (what the code prints),
+          not the paper. `occurrence` picks which match to use when the pattern matches several
+          times: "first", "last", or an index such as "-1". Change these when reproduce_metric
+          returned NOT_FOUND or an implausible value; such edits are only accepted if they find a
+          number in the latest run log, and the result reports the value they read."""
         updates = {k: v for k, v in {"recorded": recorded, "tolerance": tolerance}.items() if v is not None}
         updates.update({k: v for k, v in {"source": source, "pattern": pattern, "after": after}.items() if v})
+        if occurrence:
+            occ = occurrence.strip().lower()
+            if occ not in ("first", "last"):
+                try:
+                    occ = int(occ)
+                except ValueError:
+                    return _dump({"status": "ERROR", "message": "occurrence must be first, last, or an integer index"})
+            updates["occurrence"] = occ
         if not updates:
             return _dump({"status": "ERROR", "message": "pass at least one field to change"})
         try:
             return _dump(do_update_metric(state, metric, updates))
         except RuntimeError as e:
             return _dump({"status": "ERROR", "message": str(e)})
+
+    @tool
+    def find_run_commands(repo_path: str, dockerfile: str = "") -> str:
+        """Read a cloned repo (and optionally its Dockerfile) and report how it can be run:
+        commands documented in its README/scripts, its entry scripts and their command-line options,
+        and where the Dockerfile puts the code and runs it. Use it to choose the command for
+        generate_spec."""
+        return _dump(spec_gen.find_run_commands(repo_path, dockerfile))
+
+    @tool
+    def generate_spec(paper_name: str, dockerfile: str, repo_path: str, command: str, metrics: str,
+                      data_dir: str = "", data_mount: str = "", record_path: str = "",
+                      gpu: Optional[bool] = None, timeout_minutes: int = 600, tolerance: float = 1.0) -> str:
+        """Write the paper's spec.yaml from its Dockerfile (Team 1), its cloned repo, the chosen run
+        command and the metric names (comma-separated, as named in the metrics record).
+        Works out the working folder, where to mount `data_dir` (from data paths in the command and
+        paths hard-coded in the code), env settings such as WANDB_MODE, and GPU use; fills recorded
+        values from `record_path` (Team 2's metrics record) when given. Metric patterns start as
+        placeholders, set after the first run with update_spec_metric. Reports how each choice was
+        made - check it - and loads the spec as the active paper."""
+        papers = writable_roots[-1]
+        names = [s.strip() for s in metrics.split(",") if s.strip()]
+        with _SPEC_LOCK:
+            result = spec_gen.generate_spec(papers, paper_name, dockerfile, repo_path, command, names,
+                                        data_dir=data_dir, data_mount=data_mount, record_path=record_path,
+                                        gpu=gpu, timeout_minutes=timeout_minutes, tolerance=tolerance)
+        if result.get("status") == "OK":
+            state.set_spec(result["spec_path"])
+        return _dump(result)
 
     @tool
     def inspect_repo(repo_url: str) -> str:
@@ -288,17 +397,42 @@ def make_tools(state: ReproState, writable_roots: list) -> list:
         return _dump(summary)
 
     @tool
-    def read_file(path: str, start_line: int = 1, max_lines: int = 300) -> str:
-        """Read lines from a text file (e.g. a cloned repo's training script, to find its
-        command-line flags and how it prints metrics)."""
+    def read_file(path: str, start_line: int = 1, max_lines: int = 200, search: str = "") -> str:
+        """Read numbered lines from a text file (e.g. a cloned repo's training script, to find its
+        command-line flags and how it prints metrics, or a run log).
+        - Without `search`: returns `max_lines` lines from `start_line`.
+        - With `search` (a case-insensitive regex): returns only matching lines, each with the
+          2 lines around it, starting from `start_line`. Use this to find a function or a
+          print statement instead of paging through the whole file."""
         try:
             with open(os.path.expanduser(path), errors="replace") as f:
-                lines = f.readlines()
+                text = f.read()
         except OSError as e:
             return f"ERROR: {e}"
-        chunk = lines[start_line - 1:start_line - 1 + max_lines]
-        return "".join(f"{i}\t{l}" for i, l in enumerate(chunk, start_line)) + \
-            (f"\n... ({len(lines)} lines total)" if len(lines) > start_line - 1 + max_lines else "")
+        lines = ANSI_ESCAPES.sub("", text).replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        start = max(1, start_line)
+        if search:
+            try:
+                rx = re.compile(search, re.IGNORECASE)
+            except re.error as e:
+                return f"ERROR: invalid regex: {e}"
+            hits = [i for i in range(start - 1, len(lines)) if rx.search(lines[i])][:max(1, max_lines)]
+            if not hits:
+                return f"no lines match {search!r} ({len(lines)} lines total)"
+            keep = sorted({j for i in hits for j in range(max(0, i - 2), min(len(lines), i + 3))})
+            out, prev = [], None
+            for j in keep:
+                if prev is not None and j != prev + 1:
+                    out.append("---")
+                out.append(f"{j + 1}\t{lines[j][:400]}")
+                prev = j
+            return "\n".join(out)[:READ_LIMIT] + f"\n({len(hits)} matching lines, {len(lines)} lines total)"
+        chunk = lines[start - 1:start - 1 + max_lines]
+        body = "\n".join(f"{i}\t{l[:400]}" for i, l in enumerate(chunk, start))
+        more = start - 1 + max_lines < len(lines)
+        if len(body) > READ_LIMIT:
+            body, more = body[:READ_LIMIT], True
+        return body + (f"\n... (truncated; {len(lines)} lines total - use start_line or search)" if more else "")
 
     @tool
     def write_file(path: str, content: str) -> str:
@@ -307,6 +441,10 @@ def make_tools(state: ReproState, writable_roots: list) -> list:
         full = os.path.abspath(os.path.expanduser(path))
         if not any(full == r or full.startswith(r + os.sep) for r in roots):
             return f"ERROR: writes are only allowed under {roots}"
+        repos = os.path.join(state.workspace, "repos")
+        if full == repos or full.startswith(repos + os.sep):
+            return ("ERROR: the paper's code is read-only. A reproduction must run the code as published; "
+                    "if it cannot run, report why instead of changing it.")
         os.makedirs(os.path.dirname(full), exist_ok=True)
         previous = None
         if os.path.exists(full):
@@ -325,7 +463,7 @@ def make_tools(state: ReproState, writable_roots: list) -> list:
                     with open(full, "w") as f:
                         f.write(previous)
                 return (f"ERROR: not saved - the spec does not load ({type(e).__name__}: {e}). "
-                        "To change an existing spec, use update_metric instead of rewriting it.")
+                        "To change an existing spec, use update_spec_metric or generate_spec instead.")
         return f"wrote {len(content)} chars to {full}"
 
     @tool
@@ -400,5 +538,25 @@ def make_tools(state: ReproState, writable_roots: list) -> list:
             out.append("---")
         return "\n".join(out)[:15000] or "no matches"
 
-    return [load_paper_spec, docker_build, reproduce_metric, validate_metric, update_metric,
-            inspect_repo, read_file, write_file, read_paper]
+    tools = [load_paper_spec, docker_build, reproduce_metric, validate_metric, update_spec_metric,
+             find_run_commands, generate_spec, inspect_repo, read_file, write_file, read_paper]
+    for t in tools:
+        _return_errors(t)
+    return tools
+
+
+def _return_errors(t) -> None:
+    """Make a tool hand any exception back to the agent as an ERROR result instead of crashing it."""
+    func = t.func
+
+    def safe(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            message = f"{type(e).__name__}: {e}"
+            if "no paper spec loaded" in str(e):
+                message += (". Create the paper's spec with generate_spec if it does not exist yet, "
+                            "or call load_paper_spec with its path.")
+            return _dump({"status": "ERROR", "message": message})
+
+    t.func = safe

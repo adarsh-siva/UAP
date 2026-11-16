@@ -6,3 +6,4 @@ tabulate
 pytest
 langchain-ollama
 ruamel.yaml
+langchain-openai

@@ -2,17 +2,19 @@ name: uap
 repo: https://github.com/adarsh-siva/UAP
 dockerfile: Dockerfile
 context: .
+build_args:
+  TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
 notes: >
   CVPR'22 "Fingerprinting DNNs Globally via Universal Adversarial Perturbations".
   Full-scale run with a ResNet-20 victim (10 piracy + 10 independent suspects, 150x200
   fingerprints). CIFAR-10 downloads automatically. ~1.5 h on one RTX 5070 Ti.
 run:
   command: bash demo/run_full_local.sh
-  workdir: /workspace/UAP
+  workdir: /workspace/uap
   gpu: true
   timeout_minutes: 600
   volumes:
-    ../../data/uap: /workspace/UAP/data
+    ../../data/uap: /workspace/uap/data
 metrics:
   model_auc:
     pattern: 'ROC AUC \(model level[^)]*\): ([0-9.]+)'

@@ -2,6 +2,8 @@ name: ep_bnp
 repo: https://github.com/RJ-T/NIPS2022_EP_BNP
 dockerfile: Dockerfile
 context: .
+build_args:
+  TORCH_INDEX_URL: https://download.pytorch.org/whl/cu116
 notes: >
   NeurIPS'22 "Pre-activation Distributions Expose Backdoor Neurons". Trains a BadNets-poisoned
   ResNet-18 on CIFAR-10 (auto-downloaded into data/ep_bnp/), then applies EP / BNP / CLP pruning.
@@ -11,7 +13,7 @@ run:
   command: >
     python train.py --attack-type badnets --poisoning-rate 0.1 --trigger-size 3 --manual-seed 0 --dataset-dir /data/cifar10 &&
     python test.py --attack-type badnets --poisoning-rate 0.1 --trigger-size 3 --manual-seed 0 --dataset-dir /data/cifar10
-  workdir: /workspace/NIPS2022_EP_BNP
+  workdir: /workspace
   gpu: true
   timeout_minutes: 720
   volumes:

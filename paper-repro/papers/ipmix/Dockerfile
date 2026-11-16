@@ -1,6 +1,14 @@
-FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
-RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir numpy pillow scikit-learn
-WORKDIR /workspace
-RUN git clone --depth 1 https://github.com/hzlsaber/IPMix.git
-WORKDIR /workspace/IPMix
+FROM pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+WORKDIR /app
+RUN apt-get update && \
+    apt-get install -y git && \
+    apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir \
+    numpy scipy Pillow \
+    opencv-python-headless \
+    scikit-learn tqdm
+
+RUN git clone https://github.com/hzlsaber/IPMix.git .
+CMD ["bash"]

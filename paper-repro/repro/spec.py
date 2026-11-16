@@ -6,6 +6,7 @@ against the values the paper (or another trusted record) reports.
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Optional, Union
@@ -26,6 +27,7 @@ class MetricSpec:
     scale: float = 1.0                   # multiply the parsed value (e.g. 100 for fraction -> %)
     file: Optional[str] = None           # read from this file under the outputs dir instead of stdout
     source: str = ""                     # where the recorded value comes from, e.g. "Table 2"
+    record_key: Optional[str] = None     # this metric's name in the paper's metrics record, if different
 
 
 @dataclass
@@ -36,6 +38,7 @@ class PaperSpec:
     dockerfile: str = "Dockerfile"
     context: str = "."
     image: str = ""
+    build_args: dict = field(default_factory=dict)
     run_command: str = ""
     workdir: str = ""
     gpu: bool = True
@@ -44,6 +47,7 @@ class PaperSpec:
     env: dict = field(default_factory=dict)
     volumes: dict = field(default_factory=dict)   # host path -> container path
     notes: str = ""
+    record: str = ""                     # metrics record (Team 2 format) holding the paper's values
     metrics: dict = field(default_factory=dict)   # name -> MetricSpec
 
     @property
@@ -78,9 +82,39 @@ def load_spec(path: str) -> PaperSpec:
         env=run.get("env", {}) or {},
         volumes=run.get("volumes", {}) or {},
         metrics=metrics,
-        **{k: v for k, v in raw.items() if k in {"repo", "dockerfile", "context", "image", "notes"}},
+        **{k: v for k, v in raw.items() if k in TOP_LEVEL_KEYS},
     )
-    unknown = set(raw) - {"repo", "dockerfile", "context", "image", "notes"}
+    unknown = set(raw) - TOP_LEVEL_KEYS
     if unknown:
         raise ValueError(f"unknown spec keys: {sorted(unknown)}")
+    if spec.record:
+        fill_from_record(spec)
     return spec
+
+
+TOP_LEVEL_KEYS = {"repo", "dockerfile", "context", "image", "notes", "build_args", "record"}
+
+
+def read_record(path: str) -> dict:
+    """Read a metrics record as written by Team 2's initialize_metrics_record / insert_into_record:
+    a flat JSON object {metric name: number or null}. The {"metrics": {...}} wrapper that their
+    show_current_record tool prints is accepted too."""
+    with open(path) as f:
+        data = json.load(f)
+    if isinstance(data, dict) and isinstance(data.get("metrics"), dict):
+        data = data["metrics"]
+    if not isinstance(data, dict):
+        raise ValueError(f"metrics record {path} is not a JSON object")
+    return data
+
+
+def fill_from_record(spec: PaperSpec) -> None:
+    """Take each metric's paper value from the record, unless the spec states one itself."""
+    path = spec.resolve(spec.record)
+    record = read_record(path)
+    for name, m in spec.metrics.items():
+        key = m.record_key or name
+        if m.recorded is None and record.get(key) is not None:
+            m.recorded = float(record[key])
+            if not m.source:
+                m.source = f"metrics record {os.path.basename(path)} ({key})"

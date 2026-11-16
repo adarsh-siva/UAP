@@ -62,6 +62,9 @@ def cmd_agent(args, state: ReproState) -> int:
     print(f"[task] {task}\n")
     validations_before = dict(state.data["validations"])
     spec_before = _spec_text(state)
+    if args.spec and os.path.exists(args.spec):
+        with open(args.spec) as f:
+            spec_before = f.read()
     final_text = ""
     for update in agent.stream({"messages": [{"role": "user", "content": task}]},
                                {"recursion_limit": args.max_steps}, stream_mode="updates"):
@@ -139,8 +142,8 @@ def main(argv=None) -> int:
     a.add_argument("--instructions", default="", help="extra instructions appended to the task")
     a.add_argument("--papers-dir", default=os.path.join(HERE, "papers"))
     a.add_argument("--max-steps", type=int, default=150)
-    a.add_argument("--provider", default="auto", choices=["auto", "ollama", "anthropic"],
-                   help="LLM backend (auto: anthropic if ANTHROPIC_API_KEY is set, else ollama)")
+    a.add_argument("--provider", default="auto", choices=["auto", "rcac", "ollama", "anthropic"],
+                   help="LLM backend (auto: anthropic if its key is set, then rcac, else ollama)")
     a.add_argument("--model", default="", help="model name (default: qwen3:8b for ollama, claude-opus-5-5 for anthropic)")
     a.add_argument("--no-think", action="store_true", help="ollama: turn off the model's thinking mode (faster)")
     a.add_argument("--no-fallbacks", action="store_true", help="anthropic: disable server-side refusal fallbacks")

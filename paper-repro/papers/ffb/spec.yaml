@@ -2,6 +2,8 @@ name: ffb
 repo: https://github.com/ahxt/fair_fairness_benchmark
 dockerfile: Dockerfile
 context: .
+build_args:
+  TORCH_INDEX_URL: https://download.pytorch.org/whl/cu116
 notes: >
   "FFB: A Fair Fairness Benchmark". ERM baseline on UCI Adult (sensitive attribute: sex).
   Datasets: download datasets.zip from the Dropbox link in datasets/readme.md and unzip so that
@@ -9,22 +11,22 @@ notes: >
   "train|val|test" triples for acc,ap,dp,eopp,eodd; the patterns read the test value of the
   final row. Recorded values: fill from the paper's ERM/Adult results.
 run:
-  command: python ffb_tabular_erm.py --dataset adult --data_path /data/adult/raw --target_attr income --sensitive_attr sex --evaluation_metrics acc,ap,dp,eopp,eodd
-  workdir: /workspace/fair_fairness_benchmark/src
+  command: python ffb_tabular_erm.py --dataset adult --data_path ../datasets/adult/raw --target_attr income --sensitive_attr sex --evaluation_metrics acc,ap,dp,eopp,eodd
+  workdir: /workspace/src
   gpu: true
   timeout_minutes: 120
   env:
-    WANDB_MODE: offline
+    WANDB_MODE: disabled
   volumes:
-    ../../data/ffb: /data
+    ../../data/ffb: /workspace/datasets
 metrics:
   test_acc:
     pattern: '^\|\s*\d+\s*\|\s*[0-9.]+\|[0-9.]+\|([0-9.]+)\s*\|'
-    recorded: null
+    recorded: 85.35
     tolerance: 1.0
-    source: "TODO: paper, ERM on Adult, accuracy"
+    source: "Table 4, Adult, gender, accuracy"
   test_dp:
     pattern: '^\|\s*\d+\s*\|(?:\s*[0-9.]+\|[0-9.]+\|[0-9.]+\s*\|){2}\s*[0-9.]+\|[0-9.]+\|([0-9.]+)\s*\|'
-    recorded: null
+    recorded: 16.67
     tolerance: 2.0
-    source: "TODO: paper, ERM on Adult, demographic parity gap"
+    source: "Table 4, Adult, gender, demographic parity gap"

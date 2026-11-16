@@ -1,8 +1,9 @@
 """LangChain agent that drives the reproduction tools.
 
-Two model backends:
-  ollama     - a local model served by Ollama (default when ANTHROPIC_API_KEY is unset)
-  anthropic  - Claude through the Anthropic API
+Model backends:
+  anthropic  - Claude through the Anthropic API (default when an Anthropic API key is set)
+  rcac       - Purdue RCAC GenAI Studio (OpenAI-compatible)
+  ollama     - a local model served by Ollama (used when no API key is set)
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ import json
 import os
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware, wrap_tool_call
+from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware, wrap_model_call, wrap_tool_call
 from langchain_core.messages import ToolMessage
 
 from .state import ReproState
@@ -19,82 +20,98 @@ from .tools import make_tools
 ANTHROPIC_MODEL = "claude-opus-5-5"
 OLLAMA_MODEL = "qwen3:8b"
 OLLAMA_CTX = 32768
+RCAC_BASE_URL = "https://genai.rcac.purdue.edu/api"
+RCAC_MODEL = "qwen3.8:27b"
+# RCAC models (qwen3.8:27b, gpt-oss:120b) accept at most 65,536 tokens; ~3 chars per token for code and logs
+RCAC_CONTEXT_CHARS = 110_000
+RCAC_KEY_FILE = os.path.expanduser("~/.config/rcac_genai_key")
+ANTHROPIC_KEY_FILE = os.path.expanduser("~/.config/anthropic_api_key")
 
 SYSTEM_PROMPT = """\
-You reproduce the reported results of machine-learning papers from their public code, inside Docker.
+You reproduce the reported results of machine-learning papers from their public code, inside
+containers. Other teams supply two inputs: a Dockerfile for the paper's code (Team 1) and, often,
+a metrics record with the values the paper reports (Team 2). Your job is everything between:
+work out how to run the code, write the spec, build, run, read the results, and validate them.
 
-The reproduction loop for a paper with a spec:
-1. load_paper_spec(spec_path) - see the image, run command and metrics with their recorded values.
-2. docker_build(dockerfile) - build the image. If the build fails, read the log tail, fix the
-   Dockerfile with write_file, and rebuild.
-3. reproduce_metric(metric, container) for each metric. Metrics that share a run command reuse the
-   same run, so the first call may take hours and later ones return immediately.
-   If a run fails or a pattern matches nothing, read the log tail, fix the cause (Dockerfile, run
-   command, or the metric's pattern/after/occurrence in the spec), reload the spec, and retry.
-4. validate_metric(metric) for each metric.
+Steps for a paper without a spec:
+1. inspect_repo(repo_url) to clone the code, then find_run_commands(repo_path, dockerfile) to see
+   the commands the repo documents, its scripts and their options, and where the Dockerfile puts
+   and runs the code. Read the relevant script with read_file (use `search` to jump to argument
+   definitions, data loading and print statements) to choose the exact command for the result
+   you are asked to reproduce. Prefer the repo's documented command with the options the paper's
+   setting needs; keep the script's defaults unless the paper's setting differs.
+   The experiment runs on a GPU: do not add CPU-only options (such as --device cpu).
+   Change the command only to match settings the paper or README states (batch size, epochs, ...).
+   Never change the random seed, or rerun hoping for a different number, to make a metric pass:
+   a FAIL after matching the stated settings is a valid result - report it.
+2. generate_spec(...) with that command, the metric names, the data folder if one was given, and
+   the metrics record if one was given. Read its `how_it_was_decided` and `warnings`, and check
+   them against the code: especially the working folder and where the data is mounted. If a
+   choice is wrong, call generate_spec again with corrected arguments (e.g. data_mount).
+3. docker_build(dockerfile). The Dockerfile belongs to another team: do not rewrite it. If it
+   does not build, report the build error.
+4. reproduce_metric(metric) for the first metric. This runs the experiment (it may take hours).
+   With a new spec the result is NOT_FOUND, because metric patterns start as placeholders: find
+   the line(s) holding the final result in the run log (read_file on the log path with `search`),
+   then update_spec_metric(metric, pattern=..., occurrence=...). Its reply shows `matched_line`,
+   the exact output line the number was read from - confirm it is the FINAL result (last epoch or
+   step, test split, the right column and metric), not an earlier step or another column.
+   The pattern is a Python regex with one capture group around the number. Logs often reprint
+   a table every few steps, so the final value is usually occurrence "last".
+5. reproduce_metric for each remaining metric (the finished run is reused), fixing patterns the
+   same way, then validate_metric(metric) for every metric.
 
-Onboarding a paper that has no spec yet:
-- inspect_repo(repo_url), then read_file on the training/evaluation scripts to learn their
-  command-line flags, data requirements, and the exact strings they print metrics with.
-- To find the values the paper reports: call read_paper(pdf_url) first to get the outline of
-  table captions, then read the relevant table with start_line. Check the code (read_file on the
-  scripts' argument defaults) to see which experimental setting the run command actually runs,
-  and pick the matching table, column and row. Record where each value came from in the metric's
-  `source`. Never invent a recorded value; but before concluding a value is not in the paper,
-  read every table whose caption could contain it.
-- To change an existing spec, use update_metric (one metric at a time). Never rewrite an
-  existing spec with write_file - use write_file only to create a new paper's files.
-- write_file a Dockerfile and a spec.yaml under <papers_dir>/<paper_name>/, then run the loop.
-- If the code needs data that cannot be downloaded automatically (e.g. Google Drive links,
-  registration-gated datasets), stop and tell the user exactly which files to place in which host
-  directory instead of guessing.
+If a run fails (RUN_FAILED), read the log tail and fix what is yours to fix: the command, working
+folder, data mount or env in the spec (generate_spec again). Never change the paper's code - it is
+read-only - and never edit the Dockerfile. If the code cannot run as published, say why.
 
-Spec format (YAML; relative paths resolve against the spec's folder):
-  name: <short-id>
-  repo: <git url>
-  dockerfile: Dockerfile          # build file
-  context: .                      # build context
-  image: repro-<name>:latest      # optional tag
-  notes: <free text: data requirements, deviations from the paper>
-  run:
-    command: <shell command run inside the container>
-    workdir: /workspace/<repo>
-    gpu: true
-    timeout_minutes: 1440
-    env: {KEY: value}
-    volumes: {<host path>: <container path>}   # e.g. datasets; /repro_out is always mounted for outputs
-  metrics:
-    <metric_name>:
-      pattern: '<regex with one capture group around the number>'
-      after: '<optional regex; only search output after its last match>'
-      occurrence: last            # first | last | index
-      scale: 1.0
-      file: <optional path under /repro_out to read instead of stdout>
-      command: <optional per-metric command overriding run.command>
-      recorded: <number reported by the paper, or null>
-      tolerance: 0.5
-      tolerance_type: abs         # abs | rel
-      source: "Table 2, CIFAR-10, WRN-40-4"
+Recorded values: when a metrics record is given they come from it. Otherwise find them in the
+paper with read_paper (outline first, then the table with start_line), matching the setting your
+command runs, and save each with update_spec_metric(metric, recorded=..., source="Table N, row,
+column"). Never invent a value.
 
-Choose tolerances that reflect normal run-to-run variance for the metric (e.g. about one point of
-accuracy for a single-seed CIFAR run) and state them in your final report.
+If the code needs data that is not on this machine and cannot be downloaded automatically, stop
+and say exactly which files are needed and where.
 
-Finish with a short report: for each metric the reproduced value, the recorded value, PASS/FAIL,
-and any deviations from the paper's setup (fewer epochs, different hardware, missing data).
-Report only what your tool results show. A metric is PASS or FAIL only if validate_metric
-returned that verdict in this session; otherwise write "not reproduced" or "not validated".
-Describe the spec's settings (GPU, data, commands) only as load_paper_spec reported them.
+Finish with a short report: for each metric the reproduced value, the matched output line, the
+recorded value, and PASS/FAIL, plus any deviations from the paper's setup. Report only what your
+tool results show: a metric is PASS or FAIL only if validate_metric returned that verdict.
 """
+
+
+def rcac_key() -> str:
+    key = os.environ.get("RCAC_GENAI_API_KEY", "")
+    if not key and os.path.exists(RCAC_KEY_FILE):
+        with open(RCAC_KEY_FILE) as f:
+            key = f.read().strip()
+    return key
+
+
+def anthropic_key() -> str:
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key and os.path.exists(ANTHROPIC_KEY_FILE):
+        with open(ANTHROPIC_KEY_FILE) as f:
+            key = f.read().strip()
+    return key
 
 
 def resolve_provider(provider: str = "auto") -> str:
     if provider != "auto":
         return provider
-    return "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "ollama"
+    if anthropic_key():
+        return "anthropic"
+    return "rcac" if rcac_key() else "ollama"
 
 
 def build_model(provider: str = "auto", model: str = "", fallbacks: bool = True, think: bool = True):
     provider = resolve_provider(provider)
+    if provider == "rcac":
+        from langchain_openai import ChatOpenAI
+        key = rcac_key()
+        name = model or os.environ.get("RCAC_GENAI_MODEL", RCAC_MODEL)
+        if not key:
+            raise ValueError(f"set RCAC_GENAI_API_KEY or put the key in {RCAC_KEY_FILE}")
+        return ChatOpenAI(model=name, base_url=RCAC_BASE_URL, api_key=key, temperature=0, timeout=900, max_retries=4)
     if provider == "ollama":
         from langchain_ollama import ChatOllama
         return ChatOllama(
@@ -111,36 +128,75 @@ def build_model(provider: str = "auto", model: str = "", fallbacks: bool = True,
         if fallbacks:
             # Server-side refusal fallback: a declined request is re-run on a fallback model.
             kwargs = {"betas": ["server-side-fallback-2026-07-01"], "model_kwargs": {"fallbacks": "default"}}
-        return ChatAnthropic(model=model or ANTHROPIC_MODEL, max_tokens=16000,
-                             output_config={"effort": "high"}, **kwargs)
+        key = anthropic_key()
+        if not key:
+            raise ValueError(f"set ANTHROPIC_API_KEY or put the key in {ANTHROPIC_KEY_FILE}")
+        return ChatAnthropic(model=model or ANTHROPIC_MODEL, api_key=key, max_tokens=16000,
+                             output_config={"effort": "high"}, max_retries=4, **kwargs)
     raise ValueError(f"unknown provider '{provider}' (use ollama, anthropic, or auto)")
 
 
+# Tools that change the spec, the image or the runs: after one of them, earlier results may no longer hold.
+STATE_CHANGING_TOOLS = {"update_spec_metric", "generate_spec", "docker_build", "reproduce_metric",
+                        "load_paper_spec", "write_file"}
+
+
 def repeat_guard(max_repeats: int = 2):
-    """Stop the agent re-issuing an identical tool call (a common failure loop for small models)."""
-    counts = {}
+    """Stop the agent re-issuing an identical tool call (a common failure loop for small models).
+    Counts reset whenever a state-changing tool runs, since the same call can then give a new result."""
+    counts, last_result = {}, {}
+    generation = [0]
 
     @wrap_tool_call
     def guard(request, handler):
         call = request.tool_call
-        key = (call["name"], json.dumps(call.get("args", {}), sort_keys=True))
+        key = (generation[0], call["name"], json.dumps(call.get("args", {}), sort_keys=True))
         counts[key] = counts.get(key, 0) + 1
         n = counts[key]
         if n > max_repeats:
             return ToolMessage(
                 content=(f"Refused: you have already called {call['name']} with exactly these arguments "
-                         f"{n - 1} times and the result has not changed. Use the result you already have, "
+                         f"{n - 1} times and nothing has changed since. Use the result you already have, "
                          "or take a different step (another tool, different arguments, or finish)."),
                 tool_call_id=call["id"], name=call["name"])
         result = handler(request)
-        if n > 1 and isinstance(result, ToolMessage):
-            result = ToolMessage(
-                content=f"{result.content}\n\n[note] You already made this exact call; the result is "
-                        "unchanged. Act on it instead of repeating the call.",
-                tool_call_id=result.tool_call_id, name=result.name)
+        if call["name"] in STATE_CHANGING_TOOLS:
+            generation[0] += 1
+        if isinstance(result, ToolMessage):
+            if n > 1 and last_result.get(key) == result.content:
+                result = ToolMessage(
+                    content=f"{result.content}\n\n[note] You already made this exact call; the result is "
+                            "unchanged. Act on it instead of repeating the call.",
+                    tool_call_id=result.tool_call_id, name=result.name)
+            last_result[key] = result.content
         return result
 
     return guard
+
+
+def cap_context(max_chars: int, keep_recent: int = 6):
+    """Before each model call, blank the oldest tool results until the conversation fits in
+    max_chars. A hard limit on what is sent, unlike token estimates."""
+
+    @wrap_model_call
+    def cap(request, handler):
+        messages = list(request.messages)
+        sizes = [len(str(m.content)) + len(json.dumps(getattr(m, "tool_calls", None) or [], default=str))
+                 for m in messages]
+        total = sum(sizes) + len(str(request.system_prompt or ""))
+        tool_idx = [i for i, m in enumerate(messages) if m.type == "tool"]
+        for i in tool_idx[:-keep_recent] if len(tool_idx) > keep_recent else []:
+            if total <= max_chars:
+                break
+            m = messages[i]
+            if m.name == "load_paper_spec" or str(m.content).startswith("[cleared"):
+                continue
+            placeholder = f"[cleared to save context: earlier {m.name} result]"
+            total -= sizes[i] - len(placeholder)
+            messages[i] = ToolMessage(content=placeholder, tool_call_id=m.tool_call_id, name=m.name)
+        return handler(request.override(messages=messages))
+
+    return cap
 
 
 def build_agent(state: ReproState, papers_dir: str, provider: str = "auto", model: str = "",
@@ -155,5 +211,7 @@ def build_agent(state: ReproState, papers_dir: str, provider: str = "auto", mode
         middleware.append(ContextEditingMiddleware(edits=[
             ClearToolUsesEdit(trigger=int(OLLAMA_CTX * 0.6), keep=3, exclude_tools=["load_paper_spec"]),
         ]))
+    if provider == "rcac":
+        middleware.append(cap_context(RCAC_CONTEXT_CHARS))
     llm = build_model(provider, model, fallbacks, think)
     return create_agent(llm, tools, system_prompt=prompt, middleware=middleware)

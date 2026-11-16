@@ -103,7 +103,7 @@ def test_missing_pattern_returns_none():
 def fake_docker(monkeypatch, tmp_path):
     calls = {"run": 0}
 
-    def build(df, ctx, tag, log):
+    def build(df, ctx, tag, log, build_args=None):
         open(log, "w").write("built")
         return 0, "built"
 
@@ -189,6 +189,26 @@ def test_read_paper_outline_span_and_nomatch(tmp_path):
     assert late.startswith("no lines match")
 
 
+def test_dockerfile_to_apptainer_def():
+    df = """FROM python:3.8-slim
+ARG TORCH_INDEX_URL=https://example/cpu
+ENV WANDB_MODE=disabled
+RUN apt-get update && \\
+    apt-get install -y git
+WORKDIR /workspace/src
+RUN pip install --index-url $TORCH_INDEX_URL torch
+CMD ["bash"]
+"""
+    d = docker_ops.dockerfile_to_def(df, {"TORCH_INDEX_URL": "https://example/gpu"})
+    assert "From: python:3.8-slim" in d
+    assert "export TORCH_INDEX_URL='https://example/gpu'" in d
+    assert "apt-get update &&  apt-get install -y git" in " ".join(d.split("\n")) or "apt-get install -y git" in d
+    assert d.index("cd /workspace/src") < d.index("pip install")
+    assert d.split("%environment")[1].strip() == "export WANDB_MODE=disabled"
+    with pytest.raises(docker_ops.DockerError):
+        docker_ops.dockerfile_to_def("FROM x\nCOPY . .\n")
+
+
 def test_repeat_guard():
     from langchain_core.messages import ToolMessage
     from repro.agent import repeat_guard
@@ -227,7 +247,7 @@ def test_update_metric_preserves_rest_of_spec(tmp_path):
     tools = {t.name: t for t in make_tools(state, [str(tmp_path)])}
     tools["load_paper_spec"].invoke({"spec_path": spec_path})
 
-    out = json.loads(tools["update_metric"].invoke(
+    out = json.loads(tools["update_spec_metric"].invoke(
         {"metric": "ep_acc", "recorded": 93.88, "source": "Table 1, BadNets (A2O), EP ACC"}))
     assert out["status"] == "OK"
     after = open(spec_path).read()
@@ -238,17 +258,17 @@ def test_update_metric_preserves_rest_of_spec(tmp_path):
     changed = [l for l in after.splitlines() if l not in before.splitlines()]
     assert len(changed) == 2                                        # only recorded + source lines
 
-    bad = json.loads(tools["update_metric"].invoke({"metric": "nope", "recorded": 1.0}))
+    bad = json.loads(tools["update_spec_metric"].invoke({"metric": "nope", "recorded": 1.0}))
     assert bad["status"] == "ERROR"
 
     # pattern edits are refused until there is real run output to test them on (run-4 failure mode)
-    no_run = json.loads(tools["update_metric"].invoke(
+    no_run = json.loads(tools["update_spec_metric"].invoke(
         {"metric": "ep_acc", "pattern": r"ACC\s+(\d+\.\d+)", "after": "Origin"}))
     assert no_run["status"] == "ERROR" and "no successful run" in no_run["message"]
     assert load_spec(spec_path).metrics["ep_acc"].pattern == "Test clean accuracy: ([0-9.]+)"
 
     # ...but they never block the paper fields sent in the same call (GPU run-1 failure mode)
-    mixed = json.loads(tools["update_metric"].invoke(
+    mixed = json.loads(tools["update_spec_metric"].invoke(
         {"metric": "bnp_acc", "recorded": 93.6, "source": "Table 1", "pattern": r"ACC\s+(\d+\.\d+)"}))
     assert mixed["status"] == "PARTIAL" and mixed["not_changed"] == ["pattern"]
     s = load_spec(spec_path)
@@ -260,9 +280,9 @@ def test_update_metric_preserves_rest_of_spec(tmp_path):
     log.write_text(EP_OUT)
     spec = load_spec(spec_path)
     state.record_run("repro-ep_bnp:latest", spec.run_command, str(log), 0, 1.0)
-    wrong = json.loads(tools["update_metric"].invoke({"metric": "ep_acc", "pattern": r"ACC\s+(\d+\.\d+)"}))
+    wrong = json.loads(tools["update_spec_metric"].invoke({"metric": "ep_acc", "pattern": r"ACC\s+(\d+\.\d+)"}))
     assert wrong["status"] == "ERROR" and "nothing is found" in wrong["message"]
-    right = json.loads(tools["update_metric"].invoke(
+    right = json.loads(tools["update_spec_metric"].invoke(
         {"metric": "ep_acc", "pattern": r"Test clean accuracy:\s*([0-9.]+)"}))
     assert right["status"] == "OK"
 
@@ -286,9 +306,96 @@ def test_agent_builds(monkeypatch, tmp_path, provider):
     assert agent is not None
 
 
-def test_auto_provider(monkeypatch):
+def test_auto_provider(monkeypatch, tmp_path):
     from repro.agent import resolve_provider
+    import repro.agent as ag
+    monkeypatch.setattr(ag, "RCAC_KEY_FILE", "/nonexistent")
+    monkeypatch.setattr(ag, "ANTHROPIC_KEY_FILE", "/nonexistent")
+    monkeypatch.delenv("RCAC_GENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert resolve_provider("auto") == "ollama"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    assert resolve_provider("auto") == "anthropic"
+    monkeypatch.setenv("RCAC_GENAI_API_KEY", "rcac-test")
+    assert resolve_provider("auto") == "rcac"
+    keyfile = tmp_path / "anthropic_api_key"
+    keyfile.write_text("sk-ant-from-file\n")
+    monkeypatch.setattr(ag, "ANTHROPIC_KEY_FILE", str(keyfile))
+    assert resolve_provider("auto") == "anthropic"           # Claude is preferred when its key exists
+    llm = ag.build_model("anthropic")
+    assert llm.model == ag.ANTHROPIC_MODEL and llm.anthropic_api_key.get_secret_value() == "sk-ant-from-file"
+    llm = ag.build_model("rcac", "some-model")
+    assert str(llm.openai_api_base) == ag.RCAC_BASE_URL
+
+
+def test_tool_errors_are_returned_not_raised(tmp_path):
+    state = ReproState(str(tmp_path / "ws"))
+    tools = {t.name: t for t in make_tools(state, [str(tmp_path)])}
+    for name, args in [("reproduce_metric", {"metric": "acc"}), ("validate_metric", {"metric": "acc"}),
+                       ("update_spec_metric", {"metric": "acc", "recorded": 1.0})]:
+        out = json.loads(tools[name].invoke(args))
+        assert out["status"] == "ERROR" and "load_paper_spec" in out["message"]
+
+
+def test_read_file_search_and_limits(tmp_path):
+    state = ReproState(str(tmp_path / "ws"))
+    rf = {t.name: t for t in make_tools(state, [str(tmp_path)])}["read_file"]
+    f = tmp_path / "train.py"
+    f.write_text("import os\n" + "x = 1\n" * 50 + "def metric_evaluation(y):\n    return y\n" + "\x1b[2K| 140 | 85.2 |\n")
+    hit = rf.invoke({"path": str(f), "search": "def metric_evaluation"})
+    assert "52\tdef metric_evaluation(y):" in hit and "1 matching lines" in hit
+    assert "\x1b" not in rf.invoke({"path": str(f), "start_line": 50})
+    assert rf.invoke({"path": str(f), "search": "nope"}).startswith("no lines match")
+    big = tmp_path / "big.log"
+    big.write_text(("y" * 300 + "\n") * 300)
+    assert len(rf.invoke({"path": str(big)})) < 13000
+
+
+def test_cap_context_trims_oldest_tool_results():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from repro.agent import cap_context
+
+    class Req:
+        def __init__(self, messages):
+            self.messages, self.system_prompt = messages, "sys"
+        def override(self, messages):
+            return Req(messages)
+
+    msgs = [HumanMessage(content="task")]
+    for i in range(10):
+        msgs.append(AIMessage(content="", tool_calls=[{"name": "read_file", "args": {}, "id": f"c{i}"}]))
+        msgs.append(ToolMessage(content="x" * 20000, tool_call_id=f"c{i}", name="read_file"))
+    seen = {}
+    cap_context(60000, keep_recent=2).wrap_model_call(Req(msgs), lambda r: seen.setdefault("m", r.messages))
+    sent = seen["m"]
+    assert sum(len(str(m.content)) for m in sent) <= 60000
+    assert sent[-1].content == "x" * 20000 and sent[-3].content == "x" * 20000   # newest kept
+    assert sent[2].content.startswith("[cleared")
+
+
+def test_tail_drops_apptainer_warnings():
+    from repro.tools import _tail
+    out = _tail("WARNING: Skipping mount /depot [binds]\nTraceback\nFileNotFoundError: x")
+    assert "Skipping mount" not in out and "FileNotFoundError" in out
+
+
+def test_update_metric_occurrence(tmp_path):
+    import shutil
+    src_dir = tmp_path / "ffb"
+    shutil.copytree(os.path.join(PAPERS, "ffb"), src_dir)
+    spec_path = str(src_dir / "spec.yaml")
+    state = ReproState(str(tmp_path / "ws"))
+    tools = {t.name: t for t in make_tools(state, [str(tmp_path)])}
+    tools["load_paper_spec"].invoke({"spec_path": spec_path})
+    log = tmp_path / "run.log"
+    log.write_text("|   0 | 75.22|75.21|75.22 |\n|  10 | 80.00|80.00|80.10 |\n| 140 | 85.78|85.26|85.27 |\n")
+    state.record_run("repro-ffb:latest", load_spec(spec_path).run_command, str(log), 0, 1.0)
+    first = json.loads(tools["update_spec_metric"].invoke(
+        {"metric": "test_acc", "pattern": r"\| *\d+ \| *[0-9.]+\|[0-9.]+\|([0-9.]+)", "occurrence": "first"}))
+    assert first["status"] == "OK" and first["value_from_latest_run"] == 75.22
+    last = json.loads(tools["update_spec_metric"].invoke({"metric": "test_acc", "occurrence": "last"}))
+    assert last["status"] == "OK" and last["value_from_latest_run"] == 85.27
+    assert load_spec(spec_path).metrics["test_acc"].occurrence == "last"
+    assert state.data["reproduced"]["ffb/test_acc"]["value"] == 85.27
+    assert json.loads(tools["validate_metric"].invoke({"metric": "test_acc"}))["status"] == "PASS"
+    idx = json.loads(tools["update_spec_metric"].invoke({"metric": "test_acc", "occurrence": "-2"}))
+    assert idx["value_from_latest_run"] == 80.1
+    assert json.loads(tools["update_spec_metric"].invoke({"metric": "test_acc", "occurrence": "middle"}))["status"] == "ERROR"

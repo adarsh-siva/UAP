@@ -10,7 +10,7 @@ notes: >
   CIFAR-10 table (agent: use read_paper on https://arxiv.org/pdf/2310.04780).
 run:
   command: python cifar.py --dataset cifar10 --data-path /data --mixing-set /data/ipmix_set --model wrn
-  workdir: /workspace/IPMix
+  workdir: /app
   gpu: true
   timeout_minutes: 2880
   volumes:
